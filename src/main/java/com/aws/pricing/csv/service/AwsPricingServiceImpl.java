@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvParser;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpMethod;
@@ -19,6 +20,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Spliterators;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -43,7 +45,7 @@ public class AwsPricingServiceImpl implements AwsPricingService {
         String priceUrl = String.format(awsPriceApiProperties.getUrl(), name);
         return restTemplate.execute(priceUrl, HttpMethod.GET, clientHttpRequest -> {
             clientHttpRequest.getHeaders().setAccept(Arrays.asList(MediaType.APPLICATION_OCTET_STREAM, MediaType.ALL));
-        }, response -> readResponseA(response.getBody(), pricingType));
+        }, response -> readResponseB(response.getBody(), pricingType));
     }
 
     /**
@@ -96,37 +98,64 @@ public class AwsPricingServiceImpl implements AwsPricingService {
      */
     private <T> ProductPricing<T> readResponseB(InputStream inputStream, Class<T> pricingType) {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
-            ProductPricing<T> productPricing = ProductPricing.<T>builder().formatVersion(getMeta(reader)).disclaimer(getMeta(reader))
-                    .publicationDate(getMeta(reader)).version(getMeta(reader)).offerCode(getMeta(reader)).build();
+            CsvMetaReader metaReader = new CsvMetaReader(reader).read();
 
-            CsvSchema csvSchema = getSchema(reader);
+            CsvSchema.Builder csvSchemaBuilder = new CsvSchema.Builder();
+            metaReader.getHeaders().forEach(csvSchemaBuilder::addColumn);
 
-            reader.mark(0);
-            reader.reset();
+            ObjectReader objectMapper = new CsvMapper().enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES)
+                    .readerFor(pricingType).with(csvSchemaBuilder.build());
 
-            ObjectReader objectMapper = new CsvMapper().enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES).readerFor(pricingType).with(csvSchema);
             MappingIterator<T> mappingIterator = objectMapper.readValues(reader);
-            productPricing.setPricing(mappingIterator.readAll());
-            return productPricing;
+            List<T> prices = mappingIterator.readAll();
+
+            List<String> meta = metaReader.getMeta();
+            return ProductPricing.<T>builder().formatVersion(meta.get(0)).disclaimer(meta.get(1))
+                    .publicationDate(meta.get(2)).version(meta.get(3)).offerCode(meta.get(4)).pricing(prices).build();
         } catch (Exception e) {
             log.error(e.getMessage(), e);
             return null;
         }
     }
 
-    private String getMeta(BufferedReader reader) throws IOException {
-        return readRow(reader)[1];
-    }
+    private class CsvMetaReader {
+        static final int META_SIZE = 5;
 
-    private CsvSchema getSchema(BufferedReader reader) throws IOException {
-        CsvSchema.Builder schema = new CsvSchema.Builder();
-        for (String value : readRow(reader)) {
-            schema.addColumn(StringUtils.trimAllWhitespace(value));
+        BufferedReader reader;
+        ObjectReader objectReader;
+        @Getter List<String> meta;
+        @Getter List<String> headers;
+
+        private CsvMetaReader(BufferedReader reader) {
+            this.reader = reader;
+            this.objectReader = new CsvMapper().reader().forType(String[].class);
         }
-        return schema.build();
-    }
 
-    private String[] readRow(BufferedReader reader) throws IOException {
-        return reader.readLine().replace("\"", "").split(",");
+        private CsvMetaReader read() {
+            //read meta
+            meta = Stream.generate(() -> next()[1]).limit(META_SIZE).collect(Collectors.toList()); //get every second value
+            //read headers
+            headers = Arrays.stream(next()).map(StringUtils::trimAllWhitespace).collect(Collectors.toList());
+            //reset buffered state to the price data
+            reset();
+            return this;
+        }
+
+        private String[] next() {
+            try {
+                return objectReader.readValue(reader.readLine());
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        private void reset() {
+            try {
+                reader.mark(0);
+                reader.reset();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 }
