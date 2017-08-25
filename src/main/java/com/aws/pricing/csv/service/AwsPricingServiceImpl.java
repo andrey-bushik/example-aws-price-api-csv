@@ -80,7 +80,7 @@ public class AwsPricingServiceImpl implements AwsPricingService {
     private CsvSchema readSchema(MappingIterator<String[]> iterator) {
         CsvSchema.Builder schema = new CsvSchema.Builder();
         for (String value : iterator.next()) {
-            schema.addColumn(StringUtils.trimAllWhitespace(value));
+            schema.addColumn(value.replaceAll("\\s|-|_|\\\\", ""));
         }
         return schema.build();
     }
@@ -103,10 +103,10 @@ public class AwsPricingServiceImpl implements AwsPricingService {
             CsvSchema.Builder csvSchemaBuilder = new CsvSchema.Builder();
             metaReader.getHeaders().forEach(csvSchemaBuilder::addColumn);
 
-            ObjectReader objectMapper = new CsvMapper().enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES)
+            ObjectReader objectReader = new CsvMapper().enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES)
                     .readerFor(pricingType).with(csvSchemaBuilder.build());
 
-            MappingIterator<T> mappingIterator = objectMapper.readValues(reader);
+            MappingIterator<T> mappingIterator = objectReader.readValues(reader);
             List<T> prices = mappingIterator.readAll();
 
             List<String> meta = metaReader.getMeta();
